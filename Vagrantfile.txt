@@ -1,0 +1,186 @@
+
+Vagrant.configure("2") do |config|
+  # -----------------------------------------------------  SERVIDOR  ------------------------------------------------------------ #
+  # ----------------------------------------------------------------------------------------------------------------------------- #
+  config.vm.define "servidor" do |servidor|
+    # Seleciona a box base do Ubuntu Server
+    servidor.vm.box = "ubuntu/bionic64"
+
+    # Define o nome da VM para melhor identificação
+    servidor.vm.hostname = "dhcp-server"
+
+    # Configuração de rede privada com DHCP
+    servidor.vm.network "private_network", ip: "192.168.10.10"
+
+    servidor.vm.provider "virtualbox" do |vb|
+      # Exibe a GUI do VirtualBox ao iniciar a máquina
+      vb.gui = false
+    
+      # Personaliza a quantidade de memória na VM:
+      vb.name = "Servidor"
+      vb.memory = "2024"
+      vb.cpus = "3"
+    end
+
+    # ----------------------------------------------------------------------------------------------------------------------------- #
+    # ------------------------------------------------  Config DCHP & DNS  -------------------------------------------------------- #
+    # ----------------------------------------------------------------------------------------------------------------------------- #
+
+    servidor.vm.provision "shell", inline: <<-SHELL
+      
+      # Atualiza os pacotes do sistema
+      sudo apt-get update
+
+      # Instala o servidor DHCP (ISC DHCP) e Bind9 (DNS)
+      sudo apt-get install isc-dhcp-server bind9 bind9utils bind9-doc -y
+
+      # Configura a interface para o servidor DHCP
+      sudo sed -i 's/INTERFACESv4=""/INTERFACESv4="enp0s8"/' /etc/default/isc-dhcp-server
+
+      # Configura o arquivo dhcpd.conf com as definições da rede
+      sudo bash -c 'cat > /etc/dhcp/dhcpd.conf <<EOL
+default-lease-time 600;
+max-lease-time 7200;
+authoritative;
+
+# Configurações de sub-rede
+subnet 192.168.10.0 netmask 255.255.255.0 {
+  range 192.168.10.11 192.168.10.100;
+  option routers 192.168.10.1;
+  option domain-name-servers 192.168.10.1;
+}
+'
+
+      # Reinicia o serviço DHCP para aplicar as mudanças
+      sudo systemctl restart isc-dhcp-server
+      sudo systemctl enable isc-dhcp-server
+
+    # ------------------------------------------------  DNS  -------------------------------------------------------- #
+
+      # Editar o arquivo named.conf.options 
+      
+      sudo bash -c 'cat > /etc/bind/named.conf.options <<EOL
+options {
+  directory "/var/cache/bind";
+
+  forwarders {
+    8.8.8.8;
+    8.8.4.4;
+  };
+
+  dnssec-validation auto;
+
+  auth-nxdomain no;
+
+  allow-query { 192.168.10.0/24; };
+
+  recursion yes;
+
+  listen-on { any; };
+};
+'
+
+      # Editar o arquivo named.conf.local (Configura a zona direta)
+
+      sudo bash -c 'cat > /etc/bind/named.conf.local <<EOL
+zone "rede.local" {
+    type master;
+    file "/etc/bind/db.rede.local";
+};
+
+zone "10.168.192.in-addr.arpa" {
+    type master;
+    file "/etc/bind/db.192.168.10";
+};
+'
+
+      # Crie o arquivo /etc/bind/db.rede.local com as definições dos hosts:
+      
+      sudo cp /etc/bind/db.local /etc/bind/db.rede.local
+      sudo cp /etc/bind/db.127 /etc/bind/db.192.168.10
+
+
+      # Editar o arquivo db.rede.local (Arquivo de zona direta)
+      
+      sudo bash -c 'cat > /etc/bind/db.rede.local <<EOL
+
+      $TTL 604800
+@       IN      SOA     dhcp-server.rede.local. root.rede.local. (
+                        100         ; Serial
+                        604800    ; Refresh
+                        86400     ; Retry
+                        2419200   ; Expire
+                        604800 )  ; Negative Cache TTL
+;
+
+@       IN      NS      dhcp-server.rede.local.
+dhcp-server     IN      A       192.168.10.10
+
+; Hosts da rede
+client1         IN      A       192.168.10.11
+'
+
+
+      # Editar o arquivo db.192.168.10 (arquivo da zona reversa)
+
+      sudo bash -c 'cat > /etc/bind/db.192.168.10 <<EOL
+$TTL 604800
+@       IN      SOA     dhcp-server.rede.local. root.rede.local. (
+                        2         ; Serial
+                        604800    ; Refresh
+                        86400     ; Retry
+                        2419200   ; Expire
+                        604800 )  ; Negative Cache TTL
+;
+
+@       IN      NS      dhcp-server.rede.local.
+10      IN      PTR     dhcp-server.rede.local.
+11      IN      PTR     client1.rede.local.
+'
+
+      # Verifica e reinicia o serviço Bind9
+      sudo systemctl restart bind9
+
+    SHELL
+  end
+
+  
+  # -----------------------------------------------------  CLIENTE  ------------------------------------------------------------ #
+  # ----------------------------------------------------------------------------------------------------------------------------- #
+
+  config.vm.define "cliente" do |cliente|
+
+    # Seleciona a box base do Ubuntu Server 18.04
+    cliente.vm.box = "ubuntu/bionic64"
+
+    # Define o nome da VM para melhor identificação
+    cliente.vm.hostname = "cliente"
+
+    # Configuração de rede privada, obtendo IP via DHCP
+    cliente.vm.network "private_network", type: "dhcp"
+
+    cliente.vm.provider "virtualbox" do |vb|
+      # Exibe a GUI do VirtualBox ao iniciar a máquina
+      vb.gui = false
+    
+      # Personaliza a quantidade de memória na VM:
+      vb.name = "Cliente"
+      vb.memory = "1048"
+      vb.cpus = "1"
+    end
+
+    # Provisionamento da máquina cliente para testar a conectividade com o servidor
+    cliente.vm.provision "shell", inline: <<-SHELL
+      # Atualiza os pacotes do sistema
+      sudo apt-get update
+
+      # Instala o pacote de ferramentas de rede (como o nslookup)
+      sudo apt-get install dnsutils -y
+
+      # Testa a conectividade com o servidor DHCP e DNS
+      # sleep 5  # Aguarda o DHCP fornecer o IP
+      # ip a  # Exibe o endereço IP obtido via DHCP
+      # nslookup dhcp-server.rede.local  # Testa a resolução DNS
+    SHELL
+  end
+end
